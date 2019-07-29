@@ -3,7 +3,9 @@ package copier
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 )
 
 // Copy copy things
@@ -172,7 +174,19 @@ func set(to, from reflect.Value) bool {
 			to = to.Elem()
 		}
 
-		if from.Type().ConvertibleTo(to.Type()) {
+		cft := cFromTo{
+			ToType:   to.Type(),
+			FromType: from.Type(),
+		}
+		cFunc := copiersFunc[cft]
+
+		// Try the custom registered copy first, if there are matching types
+		if cFunc != nil {
+			err := cFunc(to, from)
+			if err != nil {
+				return false
+			}
+		} else if from.Type().ConvertibleTo(to.Type()) {
 			to.Set(from.Convert(to.Type()))
 		} else if scanner, ok := to.Addr().Interface().(sql.Scanner); ok {
 			err := scanner.Scan(from.Interface())
@@ -186,4 +200,46 @@ func set(to, from reflect.Value) bool {
 		}
 	}
 	return true
+}
+
+var copiersFunc = make(map[cFromTo]CopyFunc)
+
+type cFromTo struct {
+	ToType   reflect.Type
+	FromType reflect.Type
+}
+
+type CopyFunc func(to, from reflect.Value) error
+
+type CopierFunc struct {
+	ToType   reflect.Type
+	FromType reflect.Type
+	CopyFunc CopyFunc
+}
+
+func RegisterCopyFunc(copierFunc ...CopierFunc) (err error) {
+
+	var hasError bool
+	var errMsgs []string
+
+	if copierFunc != nil && len(copierFunc) > 0 {
+		for _, f := range copierFunc {
+			if !reflect.DeepEqual(f, CopierFunc{}) && f.ToType != nil && f.CopyFunc != nil {
+				cft := cFromTo{
+					ToType:   f.ToType,
+					FromType: f.FromType,
+				}
+				copiersFunc[cft] = f.CopyFunc
+			} else {
+				hasError = true
+				errMsgs = append(errMsgs, fmt.Sprintf("can not register copier func: %+v \n", f))
+			}
+		}
+	}
+
+	if hasError {
+		err = errors.New(strings.Join(errMsgs, ""))
+	}
+
+	return err
 }
